@@ -1,0 +1,10 @@
+cradle:
+  cabal:
+    - path: "./src/server/Main.hs"
+      component: "FTPServer:exe:FTPServer"
+
+    - path: "./src/server/Commands.hs"
+      component: "FTPServer:exe:FTPServer"
+
+    - path: "./src/server/SockNetwork.hs"
+      component: "FTPServer:exe:FTPServer"
