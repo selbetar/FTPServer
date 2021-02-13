@@ -88,7 +88,7 @@ cmdPass controlHdl state params =
     then
       if getUsername state == ""
         then do
-          sendLine controlHdl "503 Bad sequence of commands."
+          sendLine controlHdl "503 Login with a user first."
           return state
         else
           if passwordActual == passwordRecived
@@ -97,7 +97,7 @@ cmdPass controlHdl state params =
               return (setIsLoggedIn True state)
             else do
               sendLine controlHdl "530 Incorrect password"
-              return state
+              return (UserState "" "" False "" "" NoConnection)
     else do
       sendLine controlHdl "501 Syntax error in parameters or arguments."
       return state
