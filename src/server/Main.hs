@@ -22,7 +22,7 @@ mainLoop sock = do
 runConn :: (Socket, SockAddr) -> IO ()
 runConn (sock, _) = do
   hdl <- socketToHandle sock ReadWriteMode
-  hSetBuffering hdl NoBuffering
+  hSetBuffering hdl NoBuffering 
   sendLine hdl "220 Welcome"
   interactFTP hdl (UserState "" "" False "" "" NoConnection)
   return ()
@@ -30,10 +30,10 @@ runConn (sock, _) = do
 -- listen for commands from client
 interactFTP :: Handle -> UserState -> IO UserState
 interactFTP h userState = do
-  print userState
+  -- print userState
   line <- hGetLine h
   putStrLn ("<< " ++ line)
-  state <- executeCommand h userState (getFirst (tokens line)) (tail (tokens line))
+  state <- executeCommand h userState (strToUpper (getFirst (tokens line))) (tail (tokens line))
   interactFTP h state
   where
     tokens :: String -> [String]

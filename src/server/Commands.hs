@@ -5,6 +5,7 @@ import Network.Socket
 import SockNetwork
 import System.IO
 
+-- username password isLoggedIn permissions rootDir dataSock
 data UserState = UserState
   { username :: String,
     password :: String,
@@ -19,7 +20,7 @@ data DataConnection = NoConnection | DataSocket Socket
   deriving (Show)
 
 cCRLF :: [Char]
-cCRLF = "\n\r"
+cCRLF = "\r\n"
 
 -- List of supported commands
 commands :: [String]
@@ -40,27 +41,115 @@ commands =
     "NOOP"
   ]
 
-users :: [UserState]
-users =
+usersList :: [UserState]
+usersList =
   [ UserState "test" "test" False "" "elrwd" NoConnection,
-    UserState "user" "" False "" "elrwd" NoConnection
+    UserState "user" "user" False "" "elrwd" NoConnection
   ]
 
 -- executeCommand executes an ftp command and send a reply to the client
-executeCommand :: Handle -> UserState -> String -> [String]-> IO UserState
-executeCommand controlHdl state command paramLst =
-  do
-    -- TODO
-    sendLine controlHdl "530"
+executeCommand :: Handle -> UserState -> String -> [String] -> IO UserState
+executeCommand controlHdl state command paramLst
+  | command == "USER" = do cmdUser controlHdl state paramLst
+  | command == "PASS" = do cmdPass controlHdl state paramLst
+  | otherwise = do
+    sendLine controlHdl "502 Command not implemented"
     return state
 
 -- sendLine sends a line over the control connection to the client
 sendLine :: Handle -> [Char] -> IO ()
 sendLine controlHdl line = do
   putStrLn (">> " ++ line)
-  hPutStrLn controlHdl (line ++ cCRLF)
+  hPutStr controlHdl (line ++ cCRLF)
+  hFlush controlHdl
 
---isUserPassValid
+cmdUser :: Handle -> UserState -> [String] -> IO UserState
+cmdUser controlHdl state params =
+  if checkParams params 1
+    then
+      if doesUserExist username usersList
+        then do
+          -- update the state
+          uState <- getUserState username
+          sendLine controlHdl "331 Username OK. Send password."
+          return uState
+        else do
+          sendLine controlHdl "530 User doesn't exist"
+          return state
+    else do
+      sendLine controlHdl "501 Syntax error in parameters or arguments."
+      return state
+  where
+    username = getFirst params
+
+cmdPass :: Handle -> UserState -> [String] -> IO UserState
+cmdPass controlHdl state params =
+  if checkParams params 1
+    then
+      if getUsername state == ""
+        then do
+          sendLine controlHdl "503 Bad sequence of commands."
+          return state
+        else
+          if passwordActual == passwordRecived
+            then do
+              sendLine controlHdl "230 User logged in, proceed."
+              return (setIsLoggedIn True state)
+            else do
+              sendLine controlHdl "530 Incorrect password"
+              return state
+    else do
+      sendLine controlHdl "501 Syntax error in parameters or arguments."
+      return state
+  where
+    passwordRecived = getFirst params
+    passwordActual = getPass state
+
+-- Takes a username, and returns the inital state of that user that is stored in
+-- usersList
+-- Assumes that username exists in the list of usersList
+getUserState :: String -> IO UserState
+getUserState name =
+  return
+    ( head
+        (filter (\(UserState username _ _ _ _ _) -> name == username) usersList)
+    )
+
+doesUserExist :: String -> [UserState] -> Bool
+doesUserExist user [] = False
+doesUserExist user users = (user == username) || doesUserExist user (tail users)
+  where
+    username = getUsername (head users)
+
+setIsLoggedIn :: Bool -> UserState -> UserState
+setIsLoggedIn status (UserState username password _ permissions rootDir dataSock) =
+  UserState username password status permissions rootDir dataSock
+
+setDataSock :: DataConnection -> UserState -> UserState
+setDataSock dataConn (UserState username password isLoggedIn permissions rootDir _) =
+  UserState username password isLoggedIn permissions rootDir dataConn
+
+getUsername :: UserState -> String
+getUsername (UserState username _ _ _ _ _) = username
+
+getPass :: UserState -> String
+getPass (UserState _ password _ _ _ _) = password
+
+getIsLoggedin :: UserState -> Bool
+getIsLoggedin (UserState _ _ isLoggedIn _ _ _) = isLoggedIn
+
+getPerms :: UserState -> String
+getPerms (UserState _ _ _ permissions _ _) = permissions
+
+getRootDir :: UserState -> String
+getRootDir (UserState _ _ _ _ rootDir _) = rootDir
+
+getDataSock :: UserState -> DataConnection
+getDataSock (UserState _ _ _ _ _ dataSock) = dataSock
+
+checkParams :: [String] -> Int -> Bool
+checkParams params count = length params == count
+
 isCmdValid :: [Char] -> Bool
 isCmdValid cmd = (strToUpper cmd) `elem` commands
 
@@ -76,10 +165,14 @@ strToUpper = map toUpper
 
 -- splitsep takes a Boolean separator function, a list and constructs a list of the elements between the separators.
 splitsep :: (a -> Bool) -> [a] -> [[a]]
-splitsep f lst = split lst []
+splitsep f lst = filter isNotEmpty (split lst [])
   where
-    split [] [] = [[]]
+    split [] [] = []
     split [] lst = [lst]
     split (h : t) lst
       | f h = lst : split t []
       | otherwise = split t (lst ++ [h])
+
+isNotEmpty :: [a] -> Bool
+isNotEmpty [] = False
+isNotEmpty lst = True
