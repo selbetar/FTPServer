@@ -147,6 +147,8 @@ getRootDir (UserState _ _ _ _ rootDir _) = rootDir
 getDataSock :: UserState -> DataConnection
 getDataSock (UserState _ _ _ _ _ dataSock) = dataSock
 
+-- takes a parameter list, and checks if it has the expected number of
+-- parameters, which is specified by count
 checkParams :: [String] -> Int -> Bool
 checkParams params count = length params == count
 
