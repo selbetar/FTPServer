@@ -21,6 +21,6 @@ executable FTPServer
   main-is:             Main.hs
   other-modules:       SockNetwork, Commands
   -- other-extensions:
-  build-depends:       base >=4.14 && <4.15, network >= 3.1.2 && < 3.2 
+  build-depends:       base >=4.14 && <4.15, network >= 3.1.2 && < 3.2, bytestring >= 0.10.12 && < 0.11
   hs-source-dirs:      src/server/
   default-language:    Haskell2010

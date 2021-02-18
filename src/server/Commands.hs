@@ -1,7 +1,11 @@
 module Commands where
 
+import qualified Control.Exception as E
+import qualified Data.ByteString as BS
+import Data.ByteString.Char8 as C8 (pack, unpack)
 import Data.Char
 import Network.Socket
+import qualified Network.Socket.ByteString as S
 import SockNetwork
 import System.IO
 
@@ -48,58 +52,66 @@ usersList =
   ]
 
 -- executeCommand executes an ftp command and send a reply to the client
-executeCommand :: Handle -> UserState -> String -> [String] -> IO UserState
-executeCommand controlHdl state command paramLst
-  | command == "USER" = do cmdUser controlHdl state paramLst
-  | command == "PASS" = do cmdPass controlHdl state paramLst
+executeCommand :: Socket -> UserState -> String -> [String] -> IO UserState
+executeCommand sock state command paramLst
+  | command == "USER" = do cmdUser sock state paramLst
+  | command == "PASS" = do cmdPass sock state paramLst
   | otherwise = do
-    sendLine controlHdl "502 Command not implemented"
+    sendLine sock "502 Command not implemented"
     return state
 
 -- sendLine sends a line over the control connection to the client
-sendLine :: Handle -> [Char] -> IO ()
-sendLine controlHdl line = do
-  putStrLn (">> " ++ line)
-  hPutStr controlHdl (line ++ cCRLF)
-  hFlush controlHdl
+-- Throws an exception if an error occurs while sending
+sendLine :: Socket -> String -> IO ()
+sendLine sock str =
+  E.catch
+    ( do
+        S.sendAll sock (C8.pack (str ++ cCRLF))
+    )
+    ( \e ->
+        do
+          let err = show (e :: E.IOException)
+          hPutStrLn stderr ("--> Error (sendLine): " ++ err)
+          E.throw e -- propagte the exception to exit interactFTP loop
+    )
 
-cmdUser :: Handle -> UserState -> [String] -> IO UserState
-cmdUser controlHdl state params =
+cmdUser :: Socket -> UserState -> [String] -> IO UserState
+cmdUser sock state params =
   if checkParams params 1
     then
       if doesUserExist username usersList
         then do
           -- update the state
           uState <- getUserState username
-          sendLine controlHdl "331 Username OK. Send password."
+          sendLine sock "331 Username OK. Send password."
           return uState
         else do
-          sendLine controlHdl "530 User doesn't exist"
+          sendLine sock "530 User doesn't exist"
           return state
     else do
-      sendLine controlHdl "501 Syntax error in parameters or arguments."
+      sendLine sock "501 Syntax error in parameters or arguments."
       return state
   where
     username = getFirst params
 
-cmdPass :: Handle -> UserState -> [String] -> IO UserState
-cmdPass controlHdl state params =
+cmdPass :: Socket -> UserState -> [String] -> IO UserState
+cmdPass sock state params =
   if checkParams params 1
     then
       if getUsername state == ""
         then do
-          sendLine controlHdl "503 Login with a user first."
+          sendLine sock "503 Login with a user first."
           return state
         else
           if passwordActual == passwordRecived
             then do
-              sendLine controlHdl "230 User logged in, proceed."
+              sendLine sock "230 User logged in, proceed."
               return (setIsLoggedIn True state)
             else do
-              sendLine controlHdl "530 Incorrect password"
+              sendLine sock "530 Incorrect password"
               return (UserState "" "" False "" "" NoConnection)
     else do
-      sendLine controlHdl "501 Syntax error in parameters or arguments."
+      sendLine sock "501 Syntax error in parameters or arguments."
       return state
   where
     passwordRecived = getFirst params
@@ -153,7 +165,7 @@ checkParams :: [String] -> Int -> Bool
 checkParams params count = length params == count
 
 isCmdValid :: [Char] -> Bool
-isCmdValid cmd = (strToUpper cmd) `elem` commands
+isCmdValid cmd = strToUpper cmd `elem` commands
 
 -- returns the first element of a list of strings
 -- or empty if there are no elements
