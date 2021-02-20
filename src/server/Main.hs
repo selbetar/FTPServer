@@ -26,7 +26,7 @@ mainLoop sock = do
 runConn :: (Socket, SockAddr) -> IO ()
 runConn (sock, _) = do
   sendLine sock "220 Welcome"
-  interactFTP sock (UserState "" "" False "" "" NoConnection)
+  interactFTP sock (UserState "" "" False "" "" NoConnection ASCII)
   return ()
 
 -- listen for commands from client
