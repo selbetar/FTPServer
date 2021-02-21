@@ -56,6 +56,9 @@ executeCommand :: Socket -> UserState -> String -> [String] -> IO UserState
 executeCommand sock state command paramLst
   | command == "USER" = do cmdUser sock state paramLst
   | command == "PASS" = do cmdPass sock state paramLst
+  | command == "TYPE" = do cmdType sock state paramLst
+  | command == "MODE" = do cmdMode sock state paramLst
+  | command == "NOOP" = do cmdNoop sock state
   | otherwise = do
     sendLine sock "502 Command not implemented"
     return state
@@ -116,6 +119,55 @@ cmdPass sock state params =
   where
     passwordRecived = getFirst params
     passwordActual = getPass state
+
+cmdNoop :: Socket -> b -> IO b
+cmdNoop sock state = do
+  sendLine sock "200 Command okay."
+  return state
+
+cmdType :: Socket -> UserState -> [String] -> IO UserState
+cmdType sock state params = do
+  if checkParams params 1
+    then
+      if getIsLoggedin state
+        then
+          if dataType == "A"
+            then do
+              sendLine sock "200 Command okay."
+              return state -- always default type
+            else do
+              sendLine sock "504 Command not implemented for that parameter"
+              return state
+        else do
+          sendLine sock "530 Not logged in."
+          return state
+    else do 
+      sendLine sock "501 Syntax error in parameters or arguments."
+      return state
+  where
+    dataType = getFirst params
+
+cmdMode :: Socket -> UserState -> [String] -> IO UserState
+cmdMode sock state params = do
+  if checkParams params 1
+    then
+      if getIsLoggedin state
+        then
+          if mode == "S"
+            then do
+              sendLine sock "200 Command okay."
+              return state -- always default mode
+            else do
+              sendLine sock "504 Command not implemented for that parameter"
+              return state
+        else do
+          sendLine sock "530 Not logged in."
+          return state
+    else do 
+      sendLine sock "501 Syntax error in parameters or arguments."
+      return state
+  where
+    mode = getFirst params
 
 -- Takes a username, and returns the inital state of that user that is stored in
 -- usersList
