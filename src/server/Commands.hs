@@ -84,9 +84,6 @@ sendLine sock str =
           E.throw e -- propagte the exception to exit interactFTP loop
     )
 
--- cmdUser handles the USER command
--- takes: controlSocket, UserState, and a parameter list provided by the client.
--- returns the UserState associated with the username sent.
 cmdUser :: Socket -> UserState -> [String] -> IO UserState
 cmdUser sock state params =
   if checkParams params 1
@@ -107,10 +104,6 @@ cmdUser sock state params =
     username = getFirst params
 
 -- TODO: set working directory
--- cmdPass handles the PASS command 
--- takes: controlSocket, UserState, and a parameter list provided by the client.
--- Modifies the UserState by setting the status of isLoggedIn
--- Or returns an empty state on an incorrect password.
 cmdPass :: Socket -> UserState -> [String] -> IO UserState
 cmdPass sock state params =
   if checkParams params 1
@@ -134,9 +127,6 @@ cmdPass sock state params =
     passwordRecived = getFirst params
     passwordActual = getPass state
 
--- cmdPasv handles the PASV command 
--- takes: controlSocket, UserState, and a parameter list provided by the client.
--- Modifies the UserState by setting the dataSock.
 cmdPasv :: Socket -> UserState -> [String] -> IO UserState
 cmdPasv sock state params
   | getIsLoggedin state =
@@ -155,9 +145,14 @@ cmdPasv sock state params
       sendLine sock "530 Log in first."
       return state
 
--- cmdRetr handles the RETR command 
--- takes: controlSocket, UserState, and a parameter list provided by the client.
--- Modifies the UserState by setting the dataSock.
+-- 550 Requested action not taken.
+-- 425 Can't open data connection.
+-- 426 Connection closed; transfer aborted
+-- 451 Requested action aborted: local error in processing.
+-- 450 Requested file action not taken. File unavailable (e.g., file busy).
+-- * 125 Data connection already open; transfer starting.
+-- 150 File status okay; about to open data connection.
+-- 226 Closing data connection. Requested file action successful.
 cmdRetr :: Socket -> UserState -> [String] -> IO UserState
 cmdRetr sock state params
   | getIsLoggedin state =
@@ -168,7 +163,7 @@ cmdRetr sock state params
             do
               sendLine sock "425 Data connection was not established."
               return state
-          | 'r' `notElem` getPerms state -> -- Check if the user allowed to invoke RETR
+          | 'r' `notElem` getPerms state ->
             do
               putStrLn (show state)
               sendLine sock "550 Requested action not taken. Not Allowed."
@@ -181,7 +176,7 @@ cmdRetr sock state params
                     let filePath = getFirst params
                     fd <- if transType == ASCII then do openFile filePath ReadMode else do openBinaryFile filePath ReadMode
                     iseof <- hIsEOF fd
-                    if iseof -- check if the file is empty on open
+                    if iseof
                       then do
                         sendLine sock "450 Requested file was empty."
                         return state
@@ -209,9 +204,6 @@ cmdRetr sock state params
   where
     getSock (DataSocket sock) = sock
 
--- sendFile sends a file over the data connection; RETR command helper
--- takes: controlSocket, (dataSock, dataSockAddr), and a file handle.
--- Returns true on a successful send, false otherwise.
 sendFile :: Socket -> (Socket, SockAddr)-> Handle -> IO Bool
 sendFile controlSock (dataSock,_) fd =
   E.catch
@@ -226,13 +218,11 @@ sendFile controlSock (dataSock,_) fd =
         do
           let err = show (e :: E.IOException)
           hPutStrLn stderr ("--> Error (sendFile): " ++ err)
-          sendLine controlSock "426 Connection closed; transfer aborted."
+          sendLine controlSock "426 Connection Closed. Transfer aborted."
           return False
     )
 
--- handleIOErrors checks the cause of an IOError that occurred due to
--- an IO command and report it to the client.
--- takes: controlSocket, and the raised error.
+
 handleIOErrors :: Socket -> IOError -> IO ()
 handleIOErrors sock err
   | isAlreadyInUseError err = do sendLine sock "450 Requested file action not taken. File is busy."
@@ -243,6 +233,18 @@ handleIOErrors sock err
     hPutStrLn stderr errStr
     sendLine sock "550 Requested file action not taken."
 
+
+getAddrPort :: SockAddr -> IO String
+getAddrPort (SockAddrInet portNum hostAddr) =
+  do
+    let (h1, h2, h3, h4) = hostAddressToTuple hostAddr
+        host = formatResponse [h1, h2, h3, h4]
+        ports = formatResponse [portNum `div` 256, portNum `mod` 256]
+        npa = "(" ++ host ++ init ports ++ ")."
+    putStrLn ("--> " ++ npa)
+    return npa
+  where
+    formatResponse lst = foldr (\x y -> show x ++ "," ++ y) [] lst
 
 -- Takes a username, and returns the inital state of that user that is stored in
 -- usersList
