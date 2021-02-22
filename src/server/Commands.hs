@@ -148,13 +148,13 @@ cmdType sock state params = do
     then
       if getIsLoggedin state
         then
-          if dataType == "A"
-            then do
-              sendLine sock "200 Command okay."
-              return state -- always default type
-            else do
-              sendLine sock "504 Command not implemented for that parameter"
-              return state
+          case transType of
+            "A" -> do sendLine sock "200 Command okay."
+                      return (setTransType ASCII state)
+            "I" -> do sendLine sock "200 Command okay."
+                      return (setTransType Binary state)
+            _  -> do sendLine sock "504 Command not implemented for that parameter"
+                     return state
         else do
           sendLine sock "530 Not logged in."
           return state
@@ -162,7 +162,7 @@ cmdType sock state params = do
       sendLine sock "501 Syntax error in parameters or arguments."
       return state
   where
-    dataType = getFirst params
+    transType = strToUpper (getFirst params)
 
 cmdMode :: Socket -> UserState -> [String] -> IO UserState
 cmdMode sock state params = do
@@ -318,6 +318,10 @@ setIsLoggedIn status (UserState username password _ permissions rootDir dataSock
 setDataSock :: DataConnection -> UserState -> UserState
 setDataSock dataConn (UserState username password isLoggedIn permissions rootDir _ transType) =
   UserState username password isLoggedIn permissions rootDir dataConn transType
+
+setTransType :: Type -> UserState -> UserState
+setTransType transType (UserState username password isLoggedIn permissions rootDir dataSock _)= 
+  UserState username password isLoggedIn permissions rootDir dataSock transType
 
 getUsername :: UserState -> String
 getUsername (UserState username _ _ _ _ _ _) = username
