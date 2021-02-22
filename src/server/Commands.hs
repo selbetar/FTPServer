@@ -8,8 +8,6 @@ import Network.Socket
 import qualified Network.Socket.ByteString as S
 import SockNetwork
 import System.IO
-import System.IO.Error
-import System.Directory
 
 -- username password isLoggedIn permissions rootDir dataSock
 data UserState = UserState
@@ -18,16 +16,12 @@ data UserState = UserState
     isLoggedIn :: Bool,
     permissions :: String, -- user access permissions
     rootDir :: String, -- starting directory of the user
-    dataSock :: DataConnection, -- data connection socket
-    transferType :: Type -- Transfer type
+    dataSock :: DataConnection -- data connection socket
   }
   deriving (Show)
 
 data DataConnection = NoConnection | DataSocket Socket
-  deriving (Show, Eq)
-
-data Type = ASCII | Binary
-  deriving (Show, Eq)
+  deriving (Show)
 
 cCRLF :: [Char]
 cCRLF = "\r\n"
@@ -53,8 +47,8 @@ commands =
 
 usersList :: [UserState]
 usersList =
-  [ UserState "test" "test" False "elrwd" "" NoConnection ASCII,
-    UserState "user" "user" False "elrwd" "" NoConnection ASCII
+  [ UserState "test" "test" False "" "elrwd" NoConnection,
+    UserState "user" "user" False "" "elrwd" NoConnection
   ]
 
 -- executeCommand executes an ftp command and send a reply to the client
@@ -63,7 +57,6 @@ executeCommand sock state command paramLst
   | command == "USER" = do cmdUser sock state paramLst
   | command == "PASS" = do cmdPass sock state paramLst
   | command == "PASV" = do cmdPasv sock state paramLst
-  | command == "RETR" = do cmdRetr sock state paramLst
   | otherwise = do
     sendLine sock "502 Command not implemented"
     return state
@@ -74,7 +67,6 @@ sendLine :: Socket -> String -> IO ()
 sendLine sock str =
   E.catch
     ( do
-        putStrLn ("--> " ++ str)
         S.sendAll sock (C8.pack (str ++ cCRLF))
     )
     ( \e ->
@@ -103,7 +95,6 @@ cmdUser sock state params =
   where
     username = getFirst params
 
--- TODO: set working directory
 cmdPass :: Socket -> UserState -> [String] -> IO UserState
 cmdPass sock state params =
   if checkParams params 1
@@ -119,7 +110,7 @@ cmdPass sock state params =
               return (setIsLoggedIn True state)
             else do
               sendLine sock "530 Incorrect password"
-              return (UserState "" "" False "" "" NoConnection ASCII)
+              return (UserState "" "" False "" "" NoConnection)
     else do
       sendLine sock "501 Syntax error in parameters or arguments."
       return state
@@ -145,95 +136,6 @@ cmdPasv sock state params
       sendLine sock "530 Log in first."
       return state
 
--- 550 Requested action not taken.
--- 425 Can't open data connection.
--- 426 Connection closed; transfer aborted
--- 451 Requested action aborted: local error in processing.
--- 450 Requested file action not taken. File unavailable (e.g., file busy).
--- * 125 Data connection already open; transfer starting.
--- 150 File status okay; about to open data connection.
--- 226 Closing data connection. Requested file action successful.
-cmdRetr :: Socket -> UserState -> [String] -> IO UserState
-cmdRetr sock state params
-  | getIsLoggedin state =
-    if checkParams params 1
-      then case () of
-        ()
-          | getDataSock state == NoConnection ->
-            do
-              sendLine sock "425 Data connection was not established."
-              return state
-          | 'r' `notElem` getPerms state ->
-            do
-              putStrLn (show state)
-              sendLine sock "550 Requested action not taken. Not Allowed."
-              return state
-          | otherwise ->
-            do
-              let transType = getType state
-              E.catch
-                ( do
-                    let filePath = getFirst params
-                    fd <- if transType == ASCII then do openFile filePath ReadMode else do openBinaryFile filePath ReadMode
-                    iseof <- hIsEOF fd
-                    if iseof
-                      then do
-                        sendLine sock "450 Requested file was empty."
-                        return state
-                      else do
-                        sendLine sock "150 File status okay; about to open data connection."
-                        -- Open control connection
-                        let dataSock = getSock (getDataSock state)
-                        controlConn <- accept dataSock
-                        sendFile sock controlConn fd
-                        return (setDataSock NoConnection state)
-                )
-                ( \e ->
-                    do 
-                      let err = e :: IOError
-                      handleIOErrors sock err
-                      return state
-                )
-      else do
-        sendLine sock "501 Syntax error in parameters or arguments."
-        return state
-  | otherwise =
-    do
-      sendLine sock "530 Log in first."
-      return state
-  where
-    getSock (DataSocket sock) = sock
-
-sendFile :: Socket -> (Socket, SockAddr)-> Handle -> IO Bool
-sendFile controlSock (dataSock,_) fd =
-  E.catch
-    ( do
-        fileContent <- BS.hGetContents fd
-        S.sendAll dataSock fileContent
-        sendLine controlSock "226 Closing data connection. Requested file action successful."
-        close dataSock
-        return True
-    )
-    ( \e ->
-        do
-          let err = show (e :: E.IOException)
-          hPutStrLn stderr ("--> Error (sendFile): " ++ err)
-          sendLine controlSock "426 Connection Closed. Transfer aborted."
-          return False
-    )
-
-
-handleIOErrors :: Socket -> IOError -> IO ()
-handleIOErrors sock err
-  | isAlreadyInUseError err = do sendLine sock "450 Requested file action not taken. File is busy."
-  | isDoesNotExistError err = do sendLine sock "550 Requested file action not taken. File doesn't exist."
-  | isPermissionError err = do sendLine sock "550 Requested file action not taken. Access denied."
-  | otherwise = do
-    let errStr = show err
-    hPutStrLn stderr errStr
-    sendLine sock "550 Requested file action not taken."
-
-
 getAddrPort :: SockAddr -> IO String
 getAddrPort (SockAddrInet portNum hostAddr) =
   do
@@ -253,7 +155,7 @@ getUserState :: String -> IO UserState
 getUserState name =
   return
     ( head
-        (filter (\(UserState username _ _ _ _ _ _) -> name == username) usersList)
+        (filter (\(UserState username _ _ _ _ _) -> name == username) usersList)
     )
 
 doesUserExist :: String -> [UserState] -> Bool
@@ -263,33 +165,30 @@ doesUserExist user users = (user == username) || doesUserExist user (tail users)
     username = getUsername (head users)
 
 setIsLoggedIn :: Bool -> UserState -> UserState
-setIsLoggedIn status (UserState username password _ permissions rootDir dataSock transType) =
-  UserState username password status permissions rootDir dataSock transType
+setIsLoggedIn status (UserState username password _ permissions rootDir dataSock) =
+  UserState username password status permissions rootDir dataSock
 
 setDataSock :: DataConnection -> UserState -> UserState
-setDataSock dataConn (UserState username password isLoggedIn permissions rootDir _ transType) =
-  UserState username password isLoggedIn permissions rootDir dataConn transType
+setDataSock dataConn (UserState username password isLoggedIn permissions rootDir _) =
+  UserState username password isLoggedIn permissions rootDir dataConn
 
 getUsername :: UserState -> String
-getUsername (UserState username _ _ _ _ _ _) = username
+getUsername (UserState username _ _ _ _ _) = username
 
 getPass :: UserState -> String
-getPass (UserState _ password _ _ _ _ _) = password
+getPass (UserState _ password _ _ _ _) = password
 
 getIsLoggedin :: UserState -> Bool
-getIsLoggedin (UserState _ _ isLoggedIn _ _ _ _) = isLoggedIn
+getIsLoggedin (UserState _ _ isLoggedIn _ _ _) = isLoggedIn
 
 getPerms :: UserState -> String
-getPerms (UserState _ _ _ permissions _ _ _) = permissions
+getPerms (UserState _ _ _ permissions _ _) = permissions
 
 getRootDir :: UserState -> String
-getRootDir (UserState _ _ _ _ rootDir _ _) = rootDir
+getRootDir (UserState _ _ _ _ rootDir _) = rootDir
 
 getDataSock :: UserState -> DataConnection
-getDataSock (UserState _ _ _ _ _ dataSock _) = dataSock
-
-getType :: UserState -> Type
-getType (UserState _ _ _ _ _ _ transferType) = transferType
+getDataSock (UserState _ _ _ _ _ dataSock) = dataSock
 
 -- takes a parameter list, and checks if it has the expected number of
 -- parameters, which is specified by count
