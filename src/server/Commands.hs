@@ -56,7 +56,6 @@ executeCommand :: Socket -> UserState -> String -> [String] -> IO UserState
 executeCommand sock state command paramLst
   | command == "USER" = do cmdUser sock state paramLst
   | command == "PASS" = do cmdPass sock state paramLst
-  | command == "PASV" = do cmdPasv sock state paramLst
   | otherwise = do
     sendLine sock "502 Command not implemented"
     return state
@@ -117,36 +116,6 @@ cmdPass sock state params =
   where
     passwordRecived = getFirst params
     passwordActual = getPass state
-
-cmdPasv :: Socket -> UserState -> [String] -> IO UserState
-cmdPasv sock state params
-  | getIsLoggedin state =
-    if checkParams params 0
-      then do
-        dataSocket <- createSock "0"
-        sockAddr <- getSocketName dataSocket
-        addrPortStr <- getAddrPort sockAddr
-        sendLine sock ("227 Entering Passive Mode " ++ addrPortStr)
-        return (setDataSock (DataSocket dataSocket) state)
-      else do
-        sendLine sock "501 PASV doesn't support any parameters."
-        return state
-  | otherwise =
-    do
-      sendLine sock "530 Log in first."
-      return state
-
-getAddrPort :: SockAddr -> IO String
-getAddrPort (SockAddrInet portNum hostAddr) =
-  do
-    let (h1, h2, h3, h4) = hostAddressToTuple hostAddr
-        host = formatResponse [h1, h2, h3, h4]
-        ports = formatResponse [portNum `div` 256, portNum `mod` 256]
-        npa = "(" ++ host ++ init ports ++ ")."
-    putStrLn ("--> " ++ npa)
-    return npa
-  where
-    formatResponse lst = foldr (\x y -> show x ++ "," ++ y) [] lst
 
 -- Takes a username, and returns the inital state of that user that is stored in
 -- usersList
