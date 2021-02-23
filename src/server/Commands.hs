@@ -2,7 +2,7 @@ module Commands where
 
 import qualified Control.Exception as E
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 as C8 (pack, unpack)
+import qualified Data.ByteString.Char8 as C8 
 import Data.Char
 import Network.Socket
 import qualified Network.Socket.ByteString as S
@@ -229,18 +229,17 @@ cmdRetr sock state params
               E.catch
                 ( do
                     let filePath = getFirst params
-                    fd <- if transType == ASCII then do openFile filePath ReadMode else do openBinaryFile filePath ReadMode
-                    iseof <- hIsEOF fd
+                    fHandle <- if transType == ASCII then do openFile filePath ReadMode else do openBinaryFile filePath ReadMode
+                    iseof <- hIsEOF fHandle
                     if iseof -- check if the file is empty on open
                       then do
                         sendLine sock "450 Requested file was empty."
                         return state
                       else do
                         sendLine sock "150 File status okay; about to open data connection."
-                        -- Open control connection
                         let dataSock = getSock (getDataSock state)
-                        controlConn <- accept dataSock
-                        sendFile sock controlConn fd transType
+                        controlConn <- accept dataSock -- Open data connection
+                        sendFile sock controlConn fHandle transType
                         return (setDataSock NoConnection state)
                 )
                 ( \e ->
@@ -263,29 +262,30 @@ cmdRetr sock state params
 -- takes: controlSocket, (dataSock, dataSockAddr), and a file handle.
 -- Returns true on a successful send, false otherwise.
 sendFile :: Socket -> (Socket, SockAddr)-> Handle -> Type -> IO Bool
-sendFile controlSock (dataSock,_) fd dataType =
+sendFile controlSock (dataSock,_) fHandle dataType =
   do
     if dataType == ASCII 
       then do 
-        sendASCII controlSock dataSock fd
-      else do 
-        sendBinary controlSock dataSock fd
+        sendASCII controlSock dataSock fHandle
+      else do
+        putStrLn "Binary Mode"
+        sendBinary controlSock dataSock fHandle
 
 
 sendASCII :: Socket -> Socket -> Handle -> IO Bool
-sendASCII controlSock dataSock fd =
+sendASCII controlSock dataSock fHandle =
   E.catch
     ( do
-        iseof <- hIsEOF fd
+        iseof <- hIsEOF fHandle
         if iseof 
           then do 
             sendLine controlSock "226 Closing data connection. Requested file action successful."
             close dataSock
             return True
           else do 
-            line <- BS.hGetLine fd
+            line <- BS.hGetLine fHandle
             S.sendAll dataSock (replaceEOL line)
-            sendASCII controlSock dataSock fd
+            sendASCII controlSock dataSock fHandle
     )
     ( \e ->
         do
@@ -296,24 +296,30 @@ sendASCII controlSock dataSock fd =
     )
   
   where
-    bCRLF = (C8.pack cCRLF)
+    bCR = (C8.pack "\r")
+    bLF = (C8.pack "\n")
     replaceEOL :: BS.ByteString -> BS.ByteString
     replaceEOL bs = 
-      if (BS.drop (BS.length bs - 2) bs) == bCRLF 
+      if (BS.drop (BS.length bs - 1) bs) == bCR -- check if it ends in CR
         then 
-          bs
+          BS.append bs bLF
         else
-          BS.append (BS.take (BS.length bs - 1) bs) bCRLF -- replace \n with \r\n
+          BS.append bs $ BS.append bCR bLF
 
 sendBinary :: Socket -> Socket-> Handle -> IO Bool
-sendBinary controlSock dataSock fd =
+sendBinary controlSock dataSock fHandle =
   E.catch
     ( do
-        fileContent <- BS.hGetContents fd
-        S.sendAll dataSock fileContent
-        sendLine controlSock "226 Closing data connection. Requested file action successful."
-        close dataSock
-        return True
+        bytesRead <- BS.hGet fHandle 1024
+        if bytesRead == BS.empty
+          then do
+            sendLine controlSock "226 Closing data connection. Requested file action successful."
+            close dataSock
+            hClose fHandle
+            return True
+          else do
+          S.sendAll dataSock bytesRead
+          sendBinary controlSock dataSock fHandle
     )
     ( \e ->
         do
