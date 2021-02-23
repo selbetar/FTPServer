@@ -54,7 +54,7 @@ commands =
 usersList :: [UserState]
 usersList =
   [ UserState "test" "test" False "elrwd" "" NoConnection ASCII,
-    UserState "user" "user" False "elrwd" "" NoConnection ASCII
+    UserState "user" "user" False "elwd" "" NoConnection ASCII
   ]
 
 -- executeCommand executes an ftp command and send a reply to the client
@@ -240,7 +240,7 @@ cmdRetr sock state params
                         -- Open control connection
                         let dataSock = getSock (getDataSock state)
                         controlConn <- accept dataSock
-                        sendFile sock controlConn fd
+                        sendFile sock controlConn fd transType
                         return (setDataSock NoConnection state)
                 )
                 ( \e ->
@@ -262,8 +262,51 @@ cmdRetr sock state params
 -- sendFile sends a file over the data connection; RETR command helper
 -- takes: controlSocket, (dataSock, dataSockAddr), and a file handle.
 -- Returns true on a successful send, false otherwise.
-sendFile :: Socket -> (Socket, SockAddr)-> Handle -> IO Bool
-sendFile controlSock (dataSock,_) fd =
+sendFile :: Socket -> (Socket, SockAddr)-> Handle -> Type -> IO Bool
+sendFile controlSock (dataSock,_) fd dataType =
+  do
+    if dataType == ASCII 
+      then do 
+        sendASCII controlSock dataSock fd
+      else do 
+        sendBinary controlSock dataSock fd
+
+
+sendASCII :: Socket -> Socket -> Handle -> IO Bool
+sendASCII controlSock dataSock fd =
+  E.catch
+    ( do
+        iseof <- hIsEOF fd
+        if iseof 
+          then do 
+            sendLine controlSock "226 Closing data connection. Requested file action successful."
+            close dataSock
+            return True
+          else do 
+            line <- BS.hGetLine fd
+            S.sendAll dataSock (replaceEOL line)
+            sendASCII controlSock dataSock fd
+    )
+    ( \e ->
+        do
+          let err = show (e :: E.IOException)
+          hPutStrLn stderr ("--> Error (sendFile): " ++ err)
+          sendLine controlSock "426 Connection closed; transfer aborted."
+          return False
+    )
+  
+  where
+    bCRLF = (C8.pack cCRLF)
+    replaceEOL :: BS.ByteString -> BS.ByteString
+    replaceEOL bs = 
+      if (BS.drop (BS.length bs - 2) bs) == bCRLF 
+        then 
+          bs
+        else
+          BS.append (BS.take (BS.length bs - 1) bs) bCRLF -- replace \n with \r\n
+
+sendBinary :: Socket -> Socket-> Handle -> IO Bool
+sendBinary controlSock dataSock fd =
   E.catch
     ( do
         fileContent <- BS.hGetContents fd
