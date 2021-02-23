@@ -4,7 +4,7 @@ import Commands
 import Control.Concurrent
 import qualified Control.Exception as E
 import qualified Data.ByteString as BS
-import Data.ByteString.Char8 as C8 (unpack)
+import qualified Data.ByteString.Char8 as C8 (unpack)
 import Network.Socket
 import qualified Network.Socket.ByteString as S
 import SockNetwork

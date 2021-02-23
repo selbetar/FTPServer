@@ -2,7 +2,7 @@ module Commands where
 
 import qualified Control.Exception as E
 import qualified Data.ByteString as BS
-import Data.ByteString.Char8 as C8 (pack, unpack)
+import qualified Data.ByteString.Char8 as C8 (pack, unpack)
 import Data.Char
 import Network.Socket
 import qualified Network.Socket.ByteString as S
@@ -194,8 +194,7 @@ cmdPasv sock state params
     if checkParams params 0
       then do
         dataSocket <- createSock "0"
-        sockAddr <- getSocketName dataSocket
-        addrPortStr <- getAddrPort sockAddr
+        addrPortStr <- getAddrPort dataSocket
         sendLine sock ("227 Entering Passive Mode " ++ addrPortStr)
         return (setDataSock (DataSocket dataSocket) state)
       else do
