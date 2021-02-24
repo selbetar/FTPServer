@@ -2,7 +2,7 @@ module Commands where
 
 import qualified Control.Exception as E
 import qualified Data.ByteString as BS
-import Data.ByteString.Char8 as C8 (pack, unpack)
+import qualified Data.ByteString.Char8 as C8 
 import Data.Char
 import Network.Socket
 import qualified Network.Socket.ByteString as S
@@ -18,7 +18,7 @@ data UserState = UserState
     password :: String,
     isLoggedIn :: Bool,
     permissions :: String, -- user access permissions
-    rootDir :: FilePath, -- starting directory of the user
+    rootDir :: FilePath, -- root directory (starting directory)
     dataSock :: DataConnection, -- data connection socket
     transferType :: Type -- Transfer type
   }
@@ -55,7 +55,7 @@ commands =
 usersList :: [UserState]
 usersList =
   [ UserState "test" "test" False "elrwd" "" NoConnection ASCII,
-    UserState "user" "user" False "elrwd" "" NoConnection ASCII
+    UserState "user" "user" False "elwd" "" NoConnection ASCII
   ]
 
 -- executeCommand executes an ftp command and send a reply to the client
@@ -99,10 +99,12 @@ cmdUser sock state params =
     then
       if doesUserExist username usersList
         then do
-          -- update the state
-          uState <- getUserState username
+          uState <- getUserState username -- get the state associated with that user
+          dir <- getCurrentDirectory
+                      -- preserve transfer parameter
+          let nuState = setTransType (getType state) $ setRootDir dir uState
           sendLine sock "331 Username OK. Send password."
-          return uState
+          return nuState
         else do
           sendLine sock "530 User doesn't exist"
           return state
@@ -112,7 +114,6 @@ cmdUser sock state params =
   where
     username = getFirst params
 
--- TODO: set working directory
 -- cmdPass handles the PASS command 
 -- takes: controlSocket, UserState, and a parameter list provided by the client.
 -- Modifies the UserState by setting the status of isLoggedIn
@@ -197,8 +198,7 @@ cmdPasv sock state params
     if checkParams params 0
       then do
         dataSocket <- createSock "0"
-        sockAddr <- getSocketName dataSocket
-        addrPortStr <- getAddrPort sockAddr
+        addrPortStr <- getAddrPort dataSocket
         sendLine sock ("227 Entering Passive Mode " ++ addrPortStr)
         return (setDataSock (DataSocket dataSocket) state)
       else do
@@ -233,18 +233,17 @@ cmdRetr sock state params
               E.catch
                 ( do
                     let filePath = getFirst params
-                    fd <- if transType == ASCII then do openFile filePath ReadMode else do openBinaryFile filePath ReadMode
-                    iseof <- hIsEOF fd
+                    fHandle <- if transType == ASCII then do openFile filePath ReadMode else do openBinaryFile filePath ReadMode
+                    iseof <- hIsEOF fHandle
                     if iseof -- check if the file is empty on open
                       then do
                         sendLine sock "450 Requested file was empty."
                         return state
                       else do
                         sendLine sock "150 File status okay; about to open data connection."
-                        -- Open control connection
                         let dataSock = getSock (getDataSock state)
-                        controlConn <- accept dataSock
-                        sendFile sock controlConn fd
+                        controlConn <- accept dataSock -- Open data connection
+                        sendFile sock controlConn fHandle transType
                         return (setDataSock NoConnection state)
                 )
                 ( \e ->
@@ -322,15 +321,65 @@ cwdHelper sock state path = do
 -- sendFile sends a file over the data connection; RETR command helper
 -- takes: controlSocket, (dataSock, dataSockAddr), and a file handle.
 -- Returns true on a successful send, false otherwise.
-sendFile :: Socket -> (Socket, SockAddr)-> Handle -> IO Bool
-sendFile controlSock (dataSock,_) fd =
+sendFile :: Socket -> (Socket, SockAddr)-> Handle -> Type -> IO Bool
+sendFile controlSock (dataSock,_) fHandle dataType =
+  do
+    if dataType == ASCII 
+      then do 
+        sendASCII controlSock dataSock fHandle
+      else do
+        putStrLn "Binary Mode"
+        sendBinary controlSock dataSock fHandle
+
+
+sendASCII :: Socket -> Socket -> Handle -> IO Bool
+sendASCII controlSock dataSock fHandle =
   E.catch
     ( do
-        fileContent <- BS.hGetContents fd
-        S.sendAll dataSock fileContent
-        sendLine controlSock "226 Closing data connection. Requested file action successful."
-        close dataSock
-        return True
+        iseof <- hIsEOF fHandle
+        if iseof 
+          then do 
+            sendLine controlSock "226 Closing data connection. Requested file action successful."
+            close dataSock
+            return True
+          else do 
+            line <- BS.hGetLine fHandle
+            S.sendAll dataSock (replaceEOL line)
+            sendASCII controlSock dataSock fHandle
+    )
+    ( \e ->
+        do
+          let err = show (e :: E.IOException)
+          hPutStrLn stderr ("--> Error (sendFile): " ++ err)
+          sendLine controlSock "426 Connection closed; transfer aborted."
+          return False
+    )
+  
+  where
+    bCR = (C8.pack "\r")
+    bLF = (C8.pack "\n")
+    replaceEOL :: BS.ByteString -> BS.ByteString
+    replaceEOL bs = 
+      if (BS.drop (BS.length bs - 1) bs) == bCR -- check if it ends in CR
+        then 
+          BS.append bs bLF
+        else
+          BS.append bs $ BS.append bCR bLF
+
+sendBinary :: Socket -> Socket-> Handle -> IO Bool
+sendBinary controlSock dataSock fHandle =
+  E.catch
+    ( do
+        bytesRead <- BS.hGet fHandle 1024
+        if bytesRead == BS.empty
+          then do
+            sendLine controlSock "226 Closing data connection. Requested file action successful."
+            close dataSock
+            hClose fHandle
+            return True
+          else do
+          S.sendAll dataSock bytesRead
+          sendBinary controlSock dataSock fHandle
     )
     ( \e ->
         do
@@ -394,6 +443,13 @@ setDataSock dataConn (UserState username password isLoggedIn permissions rootDir
 setTransType :: Type -> UserState -> UserState
 setTransType transType (UserState username password isLoggedIn permissions rootDir dataSock _)= 
   UserState username password isLoggedIn permissions rootDir dataSock transType
+
+-- Sets the rootDir to dir only if rootDir is empty
+-- in most cases, dir will be the directory where the server is running
+setRootDir :: FilePath -> UserState -> UserState
+setRootDir dir (UserState username password isLoggedIn permissions rootDir dataSock transType)
+  | rootDir == "" = (UserState username password isLoggedIn permissions dir dataSock transType)
+  | otherwise = (UserState username password isLoggedIn permissions rootDir dataSock transType)
 
 getUsername :: UserState -> String
 getUsername (UserState username _ _ _ _ _ _) = username
