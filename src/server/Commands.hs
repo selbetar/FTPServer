@@ -10,6 +10,7 @@ import SockNetwork
 import System.IO
 import System.IO.Error
 import System.Directory
+import System.FilePath
 
 -- username password isLoggedIn permissions rootDir dataSock
 data UserState = UserState
@@ -17,7 +18,7 @@ data UserState = UserState
     password :: String,
     isLoggedIn :: Bool,
     permissions :: String, -- user access permissions
-    rootDir :: String, -- starting directory of the user
+    rootDir :: FilePath, -- starting directory of the user
     dataSock :: DataConnection, -- data connection socket
     transferType :: Type -- Transfer type
   }
@@ -67,6 +68,8 @@ executeCommand sock state command paramLst
   | command == "TYPE" = do cmdType sock state paramLst
   | command == "MODE" = do cmdMode sock state paramLst
   | command == "NOOP" = do cmdNoop sock state
+  | command == "CDUP" = do cmdCdup sock state paramLst
+  | command == "CWD"  = do cmdCwd sock state paramLst
   | otherwise = do
     sendLine sock "502 Command not implemented"
     return state
@@ -260,6 +263,62 @@ cmdRetr sock state params
   where
     getSock (DataSocket sock) = sock
 
+cmdCdup :: Socket -> UserState -> [String] -> IO UserState
+cmdCdup sock state params
+  | getIsLoggedin state = do
+    if checkParams params 0
+      then do
+        rootDir <- makeAbsolute (getRootDir state)
+        currDir <- getCurrentDirectory 
+        if isSubdirectory rootDir currDir
+          then do
+            let parentDir = getParentDirectory currDir
+            setCurrentDirectory parentDir
+            sendLine sock ("200 Command okay. Current Directory: " ++ parentDir)
+            return state
+          else do
+            sendLine sock "550 Insufficient permissions. Action not taken."
+            return state
+      else do 
+        sendLine sock "501 Syntax error in parameters or arguments."
+        return state
+  | otherwise = do
+    sendLine sock "530 Not logged in."
+    return state
+
+cmdCwd :: Socket -> UserState -> [String] -> IO UserState
+cmdCwd sock state params
+  | getIsLoggedin state = do
+    if checkParams params 1
+      then do
+        if isRelative userPath
+          then do
+            absPath <- makeAbsolute userPath
+            cwdHelper sock state absPath
+          else do
+            cwdHelper sock state userPath
+      else do
+        sendLine sock "501 Syntax error in parameters or arguments."
+        return state
+  | otherwise = do
+    sendLine sock "530 Not logged in."
+    return state
+  where
+    userPath = getFirst params
+
+cwdHelper :: Socket -> UserState -> FilePath -> IO UserState
+cwdHelper sock state path = do
+  rootDir <- makeAbsolute (getRootDir state)
+  validDir <- doesDirectoryExist path
+  if validDir && (equalFilePath rootDir path || isSubdirectory rootDir path)
+    then do
+      setCurrentDirectory path
+      sendLine sock "200 Command okay."
+      return state
+    else do
+      sendLine sock "550 Invalid directory or insufficient permissions. Action not taken."
+      return state
+
 -- sendFile sends a file over the data connection; RETR command helper
 -- takes: controlSocket, (dataSock, dataSockAddr), and a file handle.
 -- Returns true on a successful send, false otherwise.
@@ -294,6 +353,19 @@ handleIOErrors sock err
     hPutStrLn stderr errStr
     sendLine sock "550 Requested file action not taken."
 
+-- returns the upper level directory or the root
+getParentDirectory :: FilePath -> FilePath
+getParentDirectory path = takeDirectory (dropTrailingPathSeparator path)
+
+-- checks if path starts with the same path as the rootDir
+-- expects both FilePaths are absolute
+isSubdirectory :: FilePath -> FilePath -> Bool
+isSubdirectory rootDir path
+  | length pathDirs >= length rootDirs = foldr ((&&) . (\ x -> fst x == snd x)) True (zip rootDirs pathDirs)
+  | otherwise = False
+  where
+    rootDirs = tail (splitDirectories rootDir)
+    pathDirs = tail (splitDirectories (getParentDirectory path))
 
 -- Takes a username, and returns the inital state of that user that is stored in
 -- usersList
