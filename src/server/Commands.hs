@@ -17,7 +17,7 @@ data UserState = UserState
     password :: String,
     isLoggedIn :: Bool,
     permissions :: String, -- user access permissions
-    rootDir :: String, -- starting directory of the user
+    rootDir :: FilePath, -- root directory (starting directory)
     dataSock :: DataConnection, -- data connection socket
     transferType :: Type -- Transfer type
   }
@@ -96,10 +96,12 @@ cmdUser sock state params =
     then
       if doesUserExist username usersList
         then do
-          -- update the state
-          uState <- getUserState username
+          uState <- getUserState username -- get the state associated with that user
+          dir <- getCurrentDirectory
+                      -- preserve transfer parameter
+          let nuState = setTransType (getType state) $ setRootDir dir uState
           sendLine sock "331 Username OK. Send password."
-          return uState
+          return nuState
         else do
           sendLine sock "530 User doesn't exist"
           return state
@@ -109,7 +111,6 @@ cmdUser sock state params =
   where
     username = getFirst params
 
--- TODO: set working directory
 -- cmdPass handles the PASS command 
 -- takes: controlSocket, UserState, and a parameter list provided by the client.
 -- Modifies the UserState by setting the status of isLoggedIn
@@ -370,6 +371,13 @@ setDataSock dataConn (UserState username password isLoggedIn permissions rootDir
 setTransType :: Type -> UserState -> UserState
 setTransType transType (UserState username password isLoggedIn permissions rootDir dataSock _)= 
   UserState username password isLoggedIn permissions rootDir dataSock transType
+
+-- Sets the rootDir to dir only if rootDir is empty
+-- in most cases, dir will be the directory where the server is running
+setRootDir :: FilePath -> UserState -> UserState
+setRootDir dir (UserState username password isLoggedIn permissions rootDir dataSock transType)
+  | rootDir == "" = (UserState username password isLoggedIn permissions dir dataSock transType)
+  | otherwise = (UserState username password isLoggedIn permissions rootDir dataSock transType)
 
 getUsername :: UserState -> String
 getUsername (UserState username _ _ _ _ _ _) = username
