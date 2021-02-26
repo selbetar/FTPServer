@@ -536,6 +536,7 @@ getParentDirectory path = takeDirectory (dropTrailingPathSeparator path)
 -- expects both FilePaths are absolute
 isSubdirectory :: FilePath -> FilePath -> Bool
 isSubdirectory rootDir path
+  | equalFilePath rootDir path = True
   | length pathDirs >= length rootDirs = foldr ((&&) . (\ x -> fst x == snd x)) True (zip rootDirs pathDirs)
   | otherwise = False
   where
