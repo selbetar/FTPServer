@@ -67,6 +67,7 @@ executeCommand sock state command paramLst
   | command == "QUIT" = do cmdQuit sock state
   | command == "NLST" = do cmdNlst sock state paramLst
   | command == "STRU" = do cmdStru sock state paramLst
+  | command == "PWD"  = do cmdPwd sock state paramLst
   | command == "RETR" = do cmdRetr sock state paramLst
   | command == "TYPE" = do cmdType sock state paramLst
   | command == "MODE" = do cmdMode sock state paramLst
@@ -321,6 +322,19 @@ cmdStru sock state params
           return state
       else do
         sendLine sock "501 Syntax error in parameters or arguments."
+-- cmdPwd handles the PWD command
+-- takes: controlSocket, UserState
+-- Sends the name of current working directory to client
+cmdPwd :: Socket -> UserState -> [String] -> IO UserState
+cmdPwd sock state params
+  | getIsLoggedin state =
+    if checkParams params 0
+      then do
+        currDir <- getCurrentDirectory
+        sendLine sock ("257 \"" ++ currDir ++ "\" is current directory.")
+        return state
+      else do
+        sendLine sock "501 PWD doesn't support any parameters."
         return state
   | otherwise =
     do
