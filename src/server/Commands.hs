@@ -385,21 +385,26 @@ cmdRetr sock state params
 cmdCdup :: Socket -> UserState -> [String] -> IO UserState
 cmdCdup sock state params
   | getIsLoggedin state = do
-    if checkParams params 0
+    if 'e' `elem` getPerms state
       then do
-        rootDir <- makeAbsolute (getRootDir state)
-        currDir <- getCurrentDirectory 
-        if isSubdirectory rootDir currDir
+        if checkParams params 0
           then do
-            let parentDir = getParentDirectory currDir
-            setCurrentDirectory parentDir
-            sendLine sock ("200 Command okay. Current Directory: " ++ parentDir)
-            return state
+            rootDir <- makeAbsolute (getRootDir state)
+            currDir <- getCurrentDirectory 
+            if isSubdirectory rootDir currDir
+              then do
+                let parentDir = getParentDirectory currDir
+                setCurrentDirectory parentDir
+                sendLine sock ("200 Command okay. Current Directory: " ++ parentDir)
+                return state
+              else do
+                sendLine sock "550 Requested action not taken. No Access."
+                return state
           else do
-            sendLine sock "550 Insufficient permissions. Action not taken."
+            sendLine sock "501 Syntax error in parameters or arguments."
             return state
       else do 
-        sendLine sock "501 Syntax error in parameters or arguments."
+        sendLine sock "550 Requested action not taken. Not Allowed."
         return state
   | otherwise = do
     sendLine sock "530 Not logged in."
@@ -408,16 +413,16 @@ cmdCdup sock state params
 cmdCwd :: Socket -> UserState -> [String] -> IO UserState
 cmdCwd sock state params
   | getIsLoggedin state = do
-    if checkParams params 1
+    if 'e' `elem` getPerms state
       then do
-        if isRelative userPath
+        if checkParams params 1
           then do
-            absPath <- makeAbsolute userPath
-            cwdHelper sock state absPath
-          else do
             cwdHelper sock state userPath
+          else do
+            sendLine sock "501 Syntax error in parameters or arguments."
+            return state  
       else do
-        sendLine sock "501 Syntax error in parameters or arguments."
+        sendLine sock "550 Requested action not taken. Not Allowed."
         return state
   | otherwise = do
     sendLine sock "530 Not logged in."
@@ -428,14 +433,15 @@ cmdCwd sock state params
 cwdHelper :: Socket -> UserState -> FilePath -> IO UserState
 cwdHelper sock state path = do
   rootDir <- makeAbsolute (getRootDir state)
-  validDir <- doesDirectoryExist path
-  if validDir && (equalFilePath rootDir path || isSubdirectory rootDir path)
+  absPath <- makeAbsolute path
+  validDir <- doesDirectoryExist absPath
+  if validDir && (equalFilePath rootDir absPath || isSubdirectory rootDir absPath)
     then do
-      setCurrentDirectory path
-      sendLine sock "200 Command okay."
+      setCurrentDirectory absPath
+      sendLine sock ("250 Requested file action okay. Current Directory: " ++ absPath)
       return state
     else do
-      sendLine sock "550 Invalid directory or insufficient permissions. Action not taken."
+      sendLine sock "550 Requested action not taken. Invalid directory or no access."
       return state
 
 -- sendFile sends a file over the data connection; RETR command helper
