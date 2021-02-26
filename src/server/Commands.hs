@@ -432,8 +432,8 @@ cmdCwd sock state params
 
 cwdHelper :: Socket -> UserState -> FilePath -> IO UserState
 cwdHelper sock state path = do
-  rootDir <- makeAbsolute (getRootDir state)
-  absPath <- makeAbsolute path
+  rootDir <- canonicalizePath (getRootDir state)
+  absPath <- canonicalizePath path
   validDir <- doesDirectoryExist absPath
   if validDir && isSubdirectory rootDir absPath
     then do
