@@ -435,7 +435,7 @@ cwdHelper sock state path = do
   rootDir <- makeAbsolute (getRootDir state)
   absPath <- makeAbsolute path
   validDir <- doesDirectoryExist absPath
-  if validDir && (equalFilePath rootDir absPath || isSubdirectory rootDir absPath)
+  if validDir && isSubdirectory rootDir absPath
     then do
       setCurrentDirectory absPath
       sendLine sock ("250 Requested file action okay. Current Directory: " ++ absPath)
