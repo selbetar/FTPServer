@@ -391,7 +391,7 @@ cmdCdup sock state params
           then do
             rootDir <- makeAbsolute (getRootDir state)
             currDir <- getCurrentDirectory 
-            if isSubdirectory rootDir currDir
+            if isSubdirectory rootDir currDir && not (equalFilePath rootDir currDir)
               then do
                 let parentDir = getParentDirectory currDir
                 setCurrentDirectory parentDir
