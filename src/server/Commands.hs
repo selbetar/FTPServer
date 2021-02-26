@@ -245,14 +245,21 @@ cmdNlst sock state params
               | checkParams params 0 ->
                 do
                   let dataSock = getSock (getDataSock state)
-                  listFiles sock dataSock (getRootDir state)
+                  currDir <- getCurrentDirectory
+                  listFiles sock dataSock currDir
                   return state
               | checkParams params 1 ->
                 do
                   let dataSock = getSock (getDataSock state)
+                  rootDir <- makeAbsolute (getRootDir state)
                   let pathName = getFirst params
-                  listFiles sock dataSock pathName
-                  return state
+                  if isSubdirectory rootDir pathName
+                    then do
+                      listFiles sock dataSock pathName
+                      return state
+                    else do
+                      sendLine sock "550 Requested action not taken. Not Allowed."
+                      return state
               | otherwise ->
                 do
                   sendLine sock "501 Syntax error in parameters or arguments."
@@ -265,13 +272,14 @@ cmdNlst sock state params
   getSock (DataSocket sock) = sock
 
 -- listFiles sends list of directories to client over the data connection
-listFiles :: Socket -> Socket -> String -> IO ()
+listFiles :: Socket -> Socket -> FilePath -> IO ()
 listFiles controlSock dataSock pathName =
   do
     E.catch
       (
         do
           entries <- listDirectory pathName
+          sendLine controlSock "150 File status okay; about to open data connection."
           dataConn <- accept dataSock -- Open data connection
           let (dataSock, _) = dataConn
           foldMap (sendFile dataSock) entries
@@ -295,7 +303,7 @@ listFiles controlSock dataSock pathName =
           do
             let err = show (e :: E.IOException)
             hPutStrLn stderr ("--> Error (listFiles): " ++ err)
-            E.throw e -- propagte the exception to exit interactFTP loop
+            E.throw e
         )
 
 -- cmdStru handles the STRU command
