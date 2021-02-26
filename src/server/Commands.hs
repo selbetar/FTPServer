@@ -64,6 +64,9 @@ executeCommand sock state command paramLst
   | command == "USER" = do cmdUser sock state paramLst
   | command == "PASS" = do cmdPass sock state paramLst
   | command == "PASV" = do cmdPasv sock state paramLst
+  | command == "QUIT" = do cmdQuit sock state
+  | command == "NLST" = do cmdNlst sock state paramLst
+  | command == "STRU" = do cmdStru sock state paramLst
   | command == "RETR" = do cmdRetr sock state paramLst
   | command == "TYPE" = do cmdType sock state paramLst
   | command == "MODE" = do cmdMode sock state paramLst
@@ -189,6 +192,7 @@ cmdMode sock state params = do
       return state
   where
     mode = getFirst params
+
 -- cmdPasv handles the PASV command 
 -- takes: controlSocket, UserState, and a parameter list provided by the client.
 -- Modifies the UserState by setting the dataSock.
@@ -208,6 +212,122 @@ cmdPasv sock state params
     do
       sendLine sock "530 Log in first."
       return state
+
+-- cmdQuit handles the QUIT command
+-- takes: controlSocket, UserState
+-- Closes the control connection
+cmdQuit :: Socket -> UserState -> IO UserState
+cmdQuit sock state =
+  do
+    sendLine sock "221 Service closing control connection."
+    close sock
+    return state
+
+-- cmdNlst handles the NLST command
+-- takes: controlSocket, UserState, and a parameter list provided by the client.
+-- Sends directory listing from server to client.
+cmdNlst :: Socket -> UserState -> [String] -> IO UserState
+cmdNlst sock state params
+  | getIsLoggedin state =
+    case () of
+      ()
+        | getDataSock state == NoConnection ->
+          do
+            sendLine sock "425 Data connection was not established."
+            return state
+        | 'l' `notElem` getPerms state -> -- Check if the user is allowed to invoke NLST
+          do
+            sendLine sock "550 Requested action not taken. Not Allowed."
+            return state
+        | otherwise -> do
+          case () of
+            ()
+              | checkParams params 0 ->
+                do
+                  let dataSock = getSock (getDataSock state)
+                  currDir <- getCurrentDirectory
+                  listFiles sock dataSock currDir
+                  return state
+              | checkParams params 1 ->
+                do
+                  let dataSock = getSock (getDataSock state)
+                  rootDir <- makeAbsolute (getRootDir state)
+                  let pathName = getFirst params
+                  if isSubdirectory rootDir pathName
+                    then do
+                      listFiles sock dataSock pathName
+                      return state
+                    else do
+                      sendLine sock "550 Requested action not taken. Not Allowed."
+                      return state
+              | otherwise ->
+                do
+                  sendLine sock "501 Syntax error in parameters or arguments."
+                  return state
+  | otherwise =
+    do
+      sendLine sock "530 Log in first."
+      return state
+  where
+  getSock (DataSocket sock) = sock
+
+-- listFiles sends list of directories to client over the data connection
+listFiles :: Socket -> Socket -> FilePath -> IO ()
+listFiles controlSock dataSock pathName =
+  do
+    E.catch
+      (
+        do
+          entries <- listDirectory pathName
+          sendLine controlSock "150 File status okay; about to open data connection."
+          dataConn <- accept dataSock -- Open data connection
+          let (dataSock, _) = dataConn
+          foldMap (sendFile dataSock) entries
+          sendLine controlSock "226 Closing data connection. Requested file action successful."
+          close dataSock
+      )
+      ( \e ->
+        do
+          let err = e :: IOError
+          handleIOErrors controlSock err
+      )
+  where
+    sendFile sock entry =
+      E.catch
+        ( do
+          putStrLn entry
+          S.sendAll sock (C8.pack (entry ++ cCRLF))
+        )
+        (
+          \e ->
+          do
+            let err = show (e :: E.IOException)
+            hPutStrLn stderr ("--> Error (listFiles): " ++ err)
+            E.throw e
+        )
+
+-- cmdStru handles the STRU command
+-- takes: controlSocket, UserState, and a parameter list provided by the client.
+cmdStru :: Socket -> UserState -> [String] -> IO UserState
+cmdStru sock state params
+  | getIsLoggedin state =
+    if checkParams params 1
+      then case structure of
+        "F" -> do
+          sendLine sock "200 Structure set to F."
+          return state
+        _ -> do
+          sendLine sock "504 Command not implemented for that parameter."
+          return state
+      else do
+        sendLine sock "501 Syntax error in parameters or arguments."
+        return state
+  | otherwise =
+    do
+      sendLine sock "530 Log in first."
+      return state
+  where
+    structure = strToUpper (getFirst params)
 
 -- cmdRetr handles the RETR command 
 -- takes: controlSocket, UserState, and a parameter list provided by the client.
