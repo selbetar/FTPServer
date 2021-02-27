@@ -10,6 +10,7 @@ import SockNetwork
 import System.IO
 import System.IO.Error
 import System.Directory
+import System.FilePath
 
 -- username password isLoggedIn permissions rootDir dataSock
 data UserState = UserState
@@ -63,11 +64,16 @@ executeCommand sock state command paramLst
   | command == "USER" = do cmdUser sock state paramLst
   | command == "PASS" = do cmdPass sock state paramLst
   | command == "PASV" = do cmdPasv sock state paramLst
+  | command == "QUIT" = do cmdQuit sock state
+  | command == "NLST" = do cmdNlst sock state paramLst
+  | command == "STRU" = do cmdStru sock state paramLst
   | command == "PWD"  = do cmdPwd sock state paramLst
   | command == "RETR" = do cmdRetr sock state paramLst
   | command == "TYPE" = do cmdType sock state paramLst
   | command == "MODE" = do cmdMode sock state paramLst
   | command == "NOOP" = do cmdNoop sock state
+  | command == "CDUP" = do cmdCdup sock state paramLst
+  | command == "CWD"  = do cmdCwd sock state paramLst
   | otherwise = do
     sendLine sock "502 Command not implemented"
     return state
@@ -187,6 +193,7 @@ cmdMode sock state params = do
       return state
   where
     mode = getFirst params
+
 -- cmdPasv handles the PASV command 
 -- takes: controlSocket, UserState, and a parameter list provided by the client.
 -- Modifies the UserState by setting the dataSock.
@@ -207,6 +214,114 @@ cmdPasv sock state params
       sendLine sock "530 Log in first."
       return state
 
+-- cmdQuit handles the QUIT command
+-- takes: controlSocket, UserState
+-- Closes the control connection
+cmdQuit :: Socket -> UserState -> IO UserState
+cmdQuit sock state =
+  do
+    sendLine sock "221 Service closing control connection."
+    close sock
+    return state
+
+-- cmdNlst handles the NLST command
+-- takes: controlSocket, UserState, and a parameter list provided by the client.
+-- Sends directory listing from server to client.
+cmdNlst :: Socket -> UserState -> [String] -> IO UserState
+cmdNlst sock state params
+  | getIsLoggedin state =
+    case () of
+      ()
+        | getDataSock state == NoConnection ->
+          do
+            sendLine sock "425 Data connection was not established."
+            return state
+        | 'l' `notElem` getPerms state -> -- Check if the user is allowed to invoke NLST
+          do
+            sendLine sock "550 Requested action not taken. Not Allowed."
+            return state
+        | otherwise -> do
+          case () of
+            ()
+              | checkParams params 0 ->
+                do
+                  let dataSock = getSock (getDataSock state)
+                  currDir <- getCurrentDirectory
+                  listFiles sock dataSock currDir
+                  return state
+              | checkParams params 1 ->
+                do
+                  let dataSock = getSock (getDataSock state)
+                  rootDir <- makeAbsolute (getRootDir state)
+                  let pathName = getFirst params
+                  if isSubdirectory rootDir pathName
+                    then do
+                      listFiles sock dataSock pathName
+                      return state
+                    else do
+                      sendLine sock "550 Requested action not taken. Not Allowed."
+                      return state
+              | otherwise ->
+                do
+                  sendLine sock "501 Syntax error in parameters or arguments."
+                  return state
+  | otherwise =
+    do
+      sendLine sock "530 Log in first."
+      return state
+  where
+  getSock (DataSocket sock) = sock
+
+-- listFiles sends list of directories to client over the data connection
+listFiles :: Socket -> Socket -> FilePath -> IO ()
+listFiles controlSock dataSock pathName =
+  do
+    E.catch
+      (
+        do
+          entries <- listDirectory pathName
+          sendLine controlSock "150 File status okay; about to open data connection."
+          dataConn <- accept dataSock -- Open data connection
+          let (dataSock, _) = dataConn
+          foldMap (sendFile dataSock) entries
+          sendLine controlSock "226 Closing data connection. Requested file action successful."
+          close dataSock
+      )
+      ( \e ->
+        do
+          let err = e :: IOError
+          handleIOErrors controlSock err
+      )
+  where
+    sendFile sock entry =
+      E.catch
+        ( do
+          putStrLn entry
+          S.sendAll sock (C8.pack (entry ++ cCRLF))
+        )
+        (
+          \e ->
+          do
+            let err = show (e :: E.IOException)
+            hPutStrLn stderr ("--> Error (listFiles): " ++ err)
+            E.throw e
+        )
+
+-- cmdStru handles the STRU command
+-- takes: controlSocket, UserState, and a parameter list provided by the client.
+cmdStru :: Socket -> UserState -> [String] -> IO UserState
+cmdStru sock state params
+  | getIsLoggedin state =
+    if checkParams params 1
+      then case structure of
+        "F" -> do
+          sendLine sock "200 Structure set to F."
+          return state
+        _ -> do
+          sendLine sock "504 Command not implemented for that parameter."
+          return state
+      else do
+        sendLine sock "501 Syntax error in parameters or arguments."
 -- cmdPwd handles the PWD command
 -- takes: controlSocket, UserState
 -- Sends the name of current working directory to client
@@ -225,6 +340,8 @@ cmdPwd sock state params
     do
       sendLine sock "530 Log in first."
       return state
+  where
+    structure = strToUpper (getFirst params)
 
 -- cmdRetr handles the RETR command 
 -- takes: controlSocket, UserState, and a parameter list provided by the client.
@@ -278,6 +395,68 @@ cmdRetr sock state params
       return state
   where
     getSock (DataSocket sock) = sock
+
+cmdCdup :: Socket -> UserState -> [String] -> IO UserState
+cmdCdup sock state params
+  | getIsLoggedin state = do
+    if 'e' `elem` getPerms state
+      then do
+        if checkParams params 0
+          then do
+            rootDir <- makeAbsolute (getRootDir state)
+            currDir <- getCurrentDirectory 
+            if isSubdirectory rootDir currDir && not (equalFilePath rootDir currDir)
+              then do
+                let parentDir = getParentDirectory currDir
+                setCurrentDirectory parentDir
+                sendLine sock ("200 Command okay. Current Directory: " ++ parentDir)
+                return state
+              else do
+                sendLine sock "550 Requested action not taken. No Access."
+                return state
+          else do
+            sendLine sock "501 Syntax error in parameters or arguments."
+            return state
+      else do 
+        sendLine sock "550 Requested action not taken. Not Allowed."
+        return state
+  | otherwise = do
+    sendLine sock "530 Not logged in."
+    return state
+
+cmdCwd :: Socket -> UserState -> [String] -> IO UserState
+cmdCwd sock state params
+  | getIsLoggedin state = do
+    if 'e' `elem` getPerms state
+      then do
+        if checkParams params 1
+          then do
+            cwdHelper sock state userPath
+          else do
+            sendLine sock "501 Syntax error in parameters or arguments."
+            return state  
+      else do
+        sendLine sock "550 Requested action not taken. Not Allowed."
+        return state
+  | otherwise = do
+    sendLine sock "530 Not logged in."
+    return state
+  where
+    userPath = getFirst params
+
+cwdHelper :: Socket -> UserState -> FilePath -> IO UserState
+cwdHelper sock state path = do
+  rootDir <- canonicalizePath (getRootDir state)
+  absPath <- canonicalizePath path
+  validDir <- doesDirectoryExist absPath
+  if validDir && isSubdirectory rootDir absPath
+    then do
+      setCurrentDirectory absPath
+      sendLine sock ("250 Requested file action okay. Current Directory: " ++ absPath)
+      return state
+    else do
+      sendLine sock "550 Requested action not taken. Invalid directory or no access."
+      return state
 
 -- sendFile sends a file over the data connection; RETR command helper
 -- takes: controlSocket, (dataSock, dataSockAddr), and a file handle.
@@ -363,6 +542,20 @@ handleIOErrors sock err
     hPutStrLn stderr errStr
     sendLine sock "550 Requested file action not taken."
 
+-- returns the upper level directory or the root
+getParentDirectory :: FilePath -> FilePath
+getParentDirectory path = takeDirectory (dropTrailingPathSeparator path)
+
+-- checks if path starts with the same path as the rootDir
+-- expects both FilePaths are absolute
+isSubdirectory :: FilePath -> FilePath -> Bool
+isSubdirectory rootDir path
+  | equalFilePath rootDir path = True
+  | length pathDirs >= length rootDirs = foldr ((&&) . (\ x -> fst x == snd x)) True (zip rootDirs pathDirs)
+  | otherwise = False
+  where
+    rootDirs = tail (splitDirectories rootDir)
+    pathDirs = tail (splitDirectories (getParentDirectory path))
 
 -- Takes a username, and returns the inital state of that user that is stored in
 -- usersList
