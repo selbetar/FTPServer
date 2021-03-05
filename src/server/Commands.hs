@@ -2,36 +2,17 @@ module Commands where
 
 import qualified Control.Exception as E
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 as C8 
+import qualified Data.ByteString.Char8 as C8
 import Data.Char
 import Network.Socket
 import qualified Network.Socket.ByteString as S
 import SockNetwork
-import System.IO
-import System.IO.Error
 import System.Directory
 import System.FilePath
-
--- username password isLoggedIn permissions rootDir dataSock
-data UserState = UserState
-  { username :: String,
-    password :: String,
-    isLoggedIn :: Bool,
-    permissions :: String, -- user access permissions
-    rootDir :: FilePath, -- root directory (starting directory)
-    dataSock :: DataConnection, -- data connection socket
-    transferType :: Type -- Transfer type
-  }
-  deriving (Show)
-
-data DataConnection = NoConnection | DataSocket Socket
-  deriving (Show, Eq)
-
-data Type = ASCII | Binary
-  deriving (Show, Eq)
-
-cCRLF :: [Char]
-cCRLF = "\r\n"
+import System.IO
+import System.IO.Error
+import UserState
+import Util
 
 -- List of supported commands
 commands :: [String]
@@ -47,16 +28,12 @@ commands =
     "TYPE",
     "STRU",
     "RETR",
-    "STOR",
     "MODE",
     "NOOP"
   ]
 
-usersList :: [UserState]
-usersList =
-  [ UserState "test" "test" False "elrwd" "" NoConnection ASCII,
-    UserState "user" "user" False "elwd" "" NoConnection ASCII
-  ]
+cCRLF :: [Char]
+cCRLF = "\r\n"
 
 -- executeCommand executes an ftp command and send a reply to the client
 executeCommand :: Socket -> UserState -> String -> [String] -> IO UserState
@@ -67,13 +44,13 @@ executeCommand sock state command paramLst
   | command == "QUIT" = do cmdQuit sock state
   | command == "NLST" = do cmdNlst sock state paramLst
   | command == "STRU" = do cmdStru sock state paramLst
-  | command == "PWD"  = do cmdPwd sock state paramLst
+  | command == "PWD" = do cmdPwd sock state paramLst
   | command == "RETR" = do cmdRetr sock state paramLst
   | command == "TYPE" = do cmdType sock state paramLst
   | command == "MODE" = do cmdMode sock state paramLst
   | command == "NOOP" = do cmdNoop sock state
   | command == "CDUP" = do cmdCdup sock state paramLst
-  | command == "CWD"  = do cmdCwd sock state paramLst
+  | command == "CWD" = do cmdCwd sock state paramLst
   | otherwise = do
     sendLine sock "502 Command not implemented"
     return state
@@ -101,24 +78,30 @@ cmdUser :: Socket -> UserState -> [String] -> IO UserState
 cmdUser sock state params =
   if checkParams params 1
     then
-      if doesUserExist username usersList
+      if getIsLoggedin state
         then do
-          uState <- getUserState username -- get the state associated with that user
-          dir <- getCurrentDirectory
-                      -- preserve transfer parameter
-          let nuState = setTransType (getType state) $ setRootDir dir uState
-          sendLine sock "331 Username OK. Send password."
-          return nuState
-        else do
-          sendLine sock "530 User doesn't exist"
+          sendLine sock "530 Changing user during an active session is not allowed."
           return state
+        else do
+          if doesUserExist username usersList
+            then do
+              uState <- getUserState username -- get the state associated with that user
+              dir <- canonicalizePath ""
+              -- preserve transfer parameter and set rootDir
+              let nuState = setTransType (getType state) (setRootDir dir uState)
+              setCurrentDirectory (getRootDir nuState)
+              sendLine sock "331 Username OK. Send password."
+              return nuState
+            else do
+              sendLine sock "530 User doesn't exist"
+              return state
     else do
       sendLine sock "501 Syntax error in parameters or arguments."
       return state
   where
     username = getFirst params
 
--- cmdPass handles the PASS command 
+-- cmdPass handles the PASS command
 -- takes: controlSocket, UserState, and a parameter list provided by the client.
 -- Modifies the UserState by setting the status of isLoggedIn
 -- Or returns an empty state on an incorrect password.
@@ -145,33 +128,40 @@ cmdPass sock state params =
     passwordRecived = getFirst params
     passwordActual = getPass state
 
-cmdNoop :: Socket -> b -> IO b
+cmdNoop :: Socket -> UserState -> IO UserState
 cmdNoop sock state = do
   sendLine sock "200 Command okay."
   return state
 
+-- cmdType handles the TYPE command
+-- takes: controlSocket, UserState, and a parameter list provided by the client.
+-- Modifies the UserState by setting the transfer type
 cmdType :: Socket -> UserState -> [String] -> IO UserState
 cmdType sock state params = do
   if checkParams params 1
     then
       if getIsLoggedin state
-        then
-          case transType of
-            "A" -> do sendLine sock "200 Command okay."
-                      return (setTransType ASCII state)
-            "I" -> do sendLine sock "200 Command okay."
-                      return (setTransType Binary state)
-            _  -> do sendLine sock "504 Command not implemented for that parameter"
-                     return state
+        then case transType of
+          "A" -> do
+            sendLine sock "200 Command okay."
+            return (setTransType ASCII state)
+          "I" -> do
+            sendLine sock "200 Command okay."
+            return (setTransType Binary state)
+          _ -> do
+            sendLine sock "504 Command not implemented for that parameter"
+            return state
         else do
           sendLine sock "530 Not logged in."
           return state
-    else do 
+    else do
       sendLine sock "501 Syntax error in parameters or arguments."
       return state
   where
     transType = strToUpper (getFirst params)
 
+-- cmdMode handles the MODE command
+-- takes: controlSocket, UserState, and a parameter list provided by the client.
 cmdMode :: Socket -> UserState -> [String] -> IO UserState
 cmdMode sock state params = do
   if checkParams params 1
@@ -188,13 +178,13 @@ cmdMode sock state params = do
         else do
           sendLine sock "530 Not logged in."
           return state
-    else do 
+    else do
       sendLine sock "501 Syntax error in parameters or arguments."
       return state
   where
-    mode = getFirst params
+    mode = strToUpper $ getFirst params
 
--- cmdPasv handles the PASV command 
+-- cmdPasv handles the PASV command
 -- takes: controlSocket, UserState, and a parameter list provided by the client.
 -- Modifies the UserState by setting the dataSock.
 cmdPasv :: Socket -> UserState -> [String] -> IO UserState
@@ -252,8 +242,8 @@ cmdNlst sock state params
               | checkParams params 1 ->
                 do
                   let dataSock = getSock (getDataSock state)
-                  rootDir <- makeAbsolute (getRootDir state)
-                  let pathName = getFirst params
+                  rootDir <- canonicalizePath (getRootDir state)
+                  pathName <- canonicalizePath (getFirst params)
                   if isSubdirectory rootDir pathName
                     then do
                       listFiles sock dataSock pathName
@@ -270,15 +260,14 @@ cmdNlst sock state params
       sendLine sock "530 Log in first."
       return state
   where
-  getSock (DataSocket sock) = sock
+    getSock (DataSocket sock) = sock
 
 -- listFiles sends list of directories to client over the data connection
 listFiles :: Socket -> Socket -> FilePath -> IO ()
 listFiles controlSock dataSock pathName =
   do
     E.catch
-      (
-        do
+      ( do
           entries <- listDirectory pathName
           sendLine controlSock "150 File status okay; about to open data connection."
           dataConn <- accept dataSock -- Open data connection
@@ -288,23 +277,22 @@ listFiles controlSock dataSock pathName =
           close dataSock
       )
       ( \e ->
-        do
-          let err = e :: IOError
-          handleIOErrors controlSock err
+          do
+            let err = e :: IOError
+            handleIOErrors controlSock err
       )
   where
     sendFile sock entry =
       E.catch
         ( do
-          putStrLn entry
-          S.sendAll sock (C8.pack (entry ++ cCRLF))
+            putStrLn entry
+            S.sendAll sock (C8.pack (entry ++ cCRLF))
         )
-        (
-          \e ->
-          do
-            let err = show (e :: E.IOException)
-            hPutStrLn stderr ("--> Error (listFiles): " ++ err)
-            E.throw e
+        ( \e ->
+            do
+              let err = show (e :: E.IOException)
+              hPutStrLn stderr ("--> Error (listFiles): " ++ err)
+              E.throw e
         )
 
 -- cmdStru handles the STRU command
@@ -322,6 +310,10 @@ cmdStru sock state params
           return state
       else do
         sendLine sock "501 Syntax error in parameters or arguments."
+        return state
+  where
+    structure = strToUpper (getFirst params)
+
 -- cmdPwd handles the PWD command
 -- takes: controlSocket, UserState
 -- Sends the name of current working directory to client
@@ -340,10 +332,8 @@ cmdPwd sock state params
     do
       sendLine sock "530 Log in first."
       return state
-  where
-    structure = strToUpper (getFirst params)
 
--- cmdRetr handles the RETR command 
+-- cmdRetr handles the RETR command
 -- takes: controlSocket, UserState, and a parameter list provided by the client.
 -- Modifies the UserState by setting the dataSock.
 cmdRetr :: Socket -> UserState -> [String] -> IO UserState
@@ -358,7 +348,6 @@ cmdRetr sock state params
               return state
           | 'r' `notElem` getPerms state -> -- Check if the user allowed to invoke RETR
             do
-              putStrLn (show state)
               sendLine sock "550 Requested action not taken. Not Allowed."
               return state
           | otherwise ->
@@ -367,21 +356,27 @@ cmdRetr sock state params
               E.catch
                 ( do
                     let filePath = getFirst params
-                    fHandle <- if transType == ASCII then do openFile filePath ReadMode else do openBinaryFile filePath ReadMode
-                    iseof <- hIsEOF fHandle
-                    if iseof -- check if the file is empty on open
+                    path <- canonicalizePath filePath
+                    if isSubdirectory (getRootDir state) (getParentDirectory path)
                       then do
-                        sendLine sock "450 Requested file was empty."
-                        return state
+                        fHandle <- if transType == ASCII then do openFile filePath ReadMode else do openBinaryFile filePath ReadMode
+                        iseof <- hIsEOF fHandle
+                        if iseof -- check if the file is empty on open
+                          then do
+                            sendLine sock "450 Requested file was empty."
+                            return state
+                          else do
+                            sendLine sock "150 File status okay; about to open data connection."
+                            let dataSock = getSock (getDataSock state)
+                            controlConn <- accept dataSock -- Open data connection
+                            sendFile sock controlConn fHandle transType
+                            return (setDataSock NoConnection state)
                       else do
-                        sendLine sock "150 File status okay; about to open data connection."
-                        let dataSock = getSock (getDataSock state)
-                        controlConn <- accept dataSock -- Open data connection
-                        sendFile sock controlConn fHandle transType
-                        return (setDataSock NoConnection state)
+                        sendLine sock "550 Requested action not taken. Not Allowed."
+                        return state
                 )
                 ( \e ->
-                    do 
+                    do
                       let err = e :: IOError
                       handleIOErrors sock err
                       return state
@@ -396,6 +391,8 @@ cmdRetr sock state params
   where
     getSock (DataSocket sock) = sock
 
+-- cmdCdup handles the CDUP command
+-- takes: controlSocket, UserState, and a parameter list provided by the client.
 cmdCdup :: Socket -> UserState -> [String] -> IO UserState
 cmdCdup sock state params
   | getIsLoggedin state = do
@@ -404,7 +401,7 @@ cmdCdup sock state params
         if checkParams params 0
           then do
             rootDir <- makeAbsolute (getRootDir state)
-            currDir <- getCurrentDirectory 
+            currDir <- getCurrentDirectory
             if isSubdirectory rootDir currDir && not (equalFilePath rootDir currDir)
               then do
                 let parentDir = getParentDirectory currDir
@@ -417,13 +414,15 @@ cmdCdup sock state params
           else do
             sendLine sock "501 Syntax error in parameters or arguments."
             return state
-      else do 
+      else do
         sendLine sock "550 Requested action not taken. Not Allowed."
         return state
   | otherwise = do
     sendLine sock "530 Not logged in."
     return state
 
+-- cmdCwd handles the CDUP command
+-- takes: controlSocket, UserState, and a parameter list provided by the client.
 cmdCwd :: Socket -> UserState -> [String] -> IO UserState
 cmdCwd sock state params
   | getIsLoggedin state = do
@@ -434,7 +433,7 @@ cmdCwd sock state params
             cwdHelper sock state userPath
           else do
             sendLine sock "501 Syntax error in parameters or arguments."
-            return state  
+            return state
       else do
         sendLine sock "550 Requested action not taken. Not Allowed."
         return state
@@ -444,6 +443,8 @@ cmdCwd sock state params
   where
     userPath = getFirst params
 
+-- cwdHelper helper function for cwd
+-- takes: controlSocket, UserState, requested path.
 cwdHelper :: Socket -> UserState -> FilePath -> IO UserState
 cwdHelper sock state path = do
   rootDir <- canonicalizePath (getRootDir state)
@@ -461,28 +462,29 @@ cwdHelper sock state path = do
 -- sendFile sends a file over the data connection; RETR command helper
 -- takes: controlSocket, (dataSock, dataSockAddr), and a file handle.
 -- Returns true on a successful send, false otherwise.
-sendFile :: Socket -> (Socket, SockAddr)-> Handle -> Type -> IO Bool
-sendFile controlSock (dataSock,_) fHandle dataType =
+sendFile :: Socket -> (Socket, SockAddr) -> Handle -> Type -> IO Bool
+sendFile controlSock (dataSock, _) fHandle dataType =
   do
-    if dataType == ASCII 
-      then do 
+    if dataType == ASCII
+      then do
         sendASCII controlSock dataSock fHandle
       else do
-        putStrLn "Binary Mode"
         sendBinary controlSock dataSock fHandle
 
-
+-- sendASCII sends file in ASCII format
+-- takes: controlSocket, dataSock, and handle to the file
+--        that holds the data that will be sent.
 sendASCII :: Socket -> Socket -> Handle -> IO Bool
 sendASCII controlSock dataSock fHandle =
   E.catch
     ( do
         iseof <- hIsEOF fHandle
-        if iseof 
-          then do 
+        if iseof
+          then do
             sendLine controlSock "226 Closing data connection. Requested file action successful."
             close dataSock
             return True
-          else do 
+          else do
             line <- BS.hGetLine fHandle
             S.sendAll dataSock (replaceEOL line)
             sendASCII controlSock dataSock fHandle
@@ -494,19 +496,19 @@ sendASCII controlSock dataSock fHandle =
           sendLine controlSock "426 Connection closed; transfer aborted."
           return False
     )
-  
   where
-    bCR = (C8.pack "\r")
-    bLF = (C8.pack "\n")
+    bCR = C8.pack "\r"
+    bLF = C8.pack "\n"
     replaceEOL :: BS.ByteString -> BS.ByteString
-    replaceEOL bs = 
-      if (BS.drop (BS.length bs - 1) bs) == bCR -- check if it ends in CR
-        then 
-          BS.append bs bLF
-        else
-          BS.append bs $ BS.append bCR bLF
+    replaceEOL bs =
+      if BS.drop (BS.length bs - 1) bs == bCR -- check if it ends in CR
+        then BS.append bs bLF
+        else BS.append bs $ BS.append bCR bLF
 
-sendBinary :: Socket -> Socket-> Handle -> IO Bool
+-- sendBinary sends file in binary format
+-- takes: controlSocket, dataSock, and handle to the file
+--        that holds the data that will be sent.
+sendBinary :: Socket -> Socket -> Handle -> IO Bool
 sendBinary controlSock dataSock fHandle =
   E.catch
     ( do
@@ -518,8 +520,8 @@ sendBinary controlSock dataSock fHandle =
             hClose fHandle
             return True
           else do
-          S.sendAll dataSock bytesRead
-          sendBinary controlSock dataSock fHandle
+            S.sendAll dataSock bytesRead
+            sendBinary controlSock dataSock fHandle
     )
     ( \e ->
         do
@@ -547,100 +549,17 @@ getParentDirectory :: FilePath -> FilePath
 getParentDirectory path = takeDirectory (dropTrailingPathSeparator path)
 
 -- checks if path starts with the same path as the rootDir
--- expects both FilePaths are absolute
+-- expects both FilePaths to be absolute
 isSubdirectory :: FilePath -> FilePath -> Bool
 isSubdirectory rootDir path
   | equalFilePath rootDir path = True
-  | length pathDirs >= length rootDirs = foldr ((&&) . (\ x -> fst x == snd x)) True (zip rootDirs pathDirs)
+  | length pathDirs >= length rootDirs = foldr ((&&) . (\x -> fst x == snd x)) True (zip rootDirs pathDirs)
   | otherwise = False
   where
     rootDirs = tail (splitDirectories rootDir)
-    pathDirs = tail (splitDirectories (getParentDirectory path))
-
--- Takes a username, and returns the inital state of that user that is stored in
--- usersList
--- Assumes that username exists in the list of usersList
-getUserState :: String -> IO UserState
-getUserState name =
-  return
-    ( head
-        (filter (\(UserState username _ _ _ _ _ _) -> name == username) usersList)
-    )
-
-doesUserExist :: String -> [UserState] -> Bool
-doesUserExist user [] = False
-doesUserExist user users = (user == username) || doesUserExist user (tail users)
-  where
-    username = getUsername (head users)
-
-setIsLoggedIn :: Bool -> UserState -> UserState
-setIsLoggedIn status (UserState username password _ permissions rootDir dataSock transType) =
-  UserState username password status permissions rootDir dataSock transType
-
-setDataSock :: DataConnection -> UserState -> UserState
-setDataSock dataConn (UserState username password isLoggedIn permissions rootDir _ transType) =
-  UserState username password isLoggedIn permissions rootDir dataConn transType
-
-setTransType :: Type -> UserState -> UserState
-setTransType transType (UserState username password isLoggedIn permissions rootDir dataSock _)= 
-  UserState username password isLoggedIn permissions rootDir dataSock transType
-
--- Sets the rootDir to dir only if rootDir is empty
--- in most cases, dir will be the directory where the server is running
-setRootDir :: FilePath -> UserState -> UserState
-setRootDir dir (UserState username password isLoggedIn permissions rootDir dataSock transType)
-  | rootDir == "" = (UserState username password isLoggedIn permissions dir dataSock transType)
-  | otherwise = (UserState username password isLoggedIn permissions rootDir dataSock transType)
-
-getUsername :: UserState -> String
-getUsername (UserState username _ _ _ _ _ _) = username
-
-getPass :: UserState -> String
-getPass (UserState _ password _ _ _ _ _) = password
-
-getIsLoggedin :: UserState -> Bool
-getIsLoggedin (UserState _ _ isLoggedIn _ _ _ _) = isLoggedIn
-
-getPerms :: UserState -> String
-getPerms (UserState _ _ _ permissions _ _ _) = permissions
-
-getRootDir :: UserState -> String
-getRootDir (UserState _ _ _ _ rootDir _ _) = rootDir
-
-getDataSock :: UserState -> DataConnection
-getDataSock (UserState _ _ _ _ _ dataSock _) = dataSock
-
-getType :: UserState -> Type
-getType (UserState _ _ _ _ _ _ transferType) = transferType
+    pathDirs = tail (splitDirectories path)
 
 -- takes a parameter list, and checks if it has the expected number of
 -- parameters, which is specified by count
 checkParams :: [String] -> Int -> Bool
 checkParams params count = length params == count
-
-isCmdValid :: [Char] -> Bool
-isCmdValid cmd = strToUpper cmd `elem` commands
-
--- returns the first element of a list of strings
--- or empty if there are no elements
-getFirst :: [String] -> String
-getFirst [] = []
-getFirst (h : t) = h
-
--- converts a string to upper case
-strToUpper :: [Char] -> [Char]
-strToUpper = map toUpper
-
--- splitsep takes a Boolean separator function, a list and constructs a list of the elements between the separators.
-splitsep :: (a -> Bool) -> [a] -> [[a]]
-splitsep f lst = filter isNotEmpty (split lst [])
-  where
-    split [] [] = []
-    split [] lst = [lst]
-    split (h : t) lst
-      | f h = lst : split t []
-      | otherwise = split t (lst ++ [h])
-
-isNotEmpty :: [a] -> Bool
-isNotEmpty [] = False
-isNotEmpty lst = True

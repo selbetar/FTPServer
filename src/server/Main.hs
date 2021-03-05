@@ -5,13 +5,15 @@ import Control.Concurrent
 import qualified Control.Exception as E
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as C8 (unpack)
+import Data.Maybe
 import Network.Socket
 import qualified Network.Socket.ByteString as S
 import SockNetwork
-import System.IO
 import System.Environment
-import Data.Maybe
+import System.IO
 import Text.Read
+import UserState
+import Util
 
 defaultPortNum :: String
 defaultPortNum = "5000"
@@ -32,13 +34,14 @@ main = do
 mainLoop :: Socket -> IO b
 mainLoop sock = do
   conn <- accept sock
-  forkIO (runConn conn) -- split off each connection into its own thread
+  runConn conn
   mainLoop sock
 
 runConn :: (Socket, SockAddr) -> IO ()
 runConn (sock, _) = do
   sendLine sock "220 Welcome"
   interactFTP sock (UserState "" "" False "" "" NoConnection ASCII)
+  putStrLn "--> done"
   return ()
 
 -- listen for commands from client
@@ -51,14 +54,19 @@ interactFTP sock userState =
           words <- S.recv sock 1024
           let line = C8.unpack words
           putStr ("<-- " ++ line)
-          state <- executeCommand sock userState (strToUpper (getFirst (tokens line))) (tail (tokens line))
-          interactFTP sock state
+          let cmd = strToUpper (getFirst (tokens line))
+              paramList = tail (tokens line)
+          state <- executeCommand sock userState cmd paramList
+          if cmd == "QUIT"
+            then do return state
+            else do interactFTP sock state
       )
       ( \e ->
           do
             let err = show (e :: E.IOException)
             hPutStrLn stderr ("--> Error (interactFTP): " ++ err)
             hPutStrLn stderr "--> Closing Control Connection"
+            close sock
             return userState
       )
   where
@@ -71,18 +79,16 @@ interactFTP sock userState =
 parseArgs :: [String] -> String
 parseArgs args
   | null args = defaultPortNum
-  | otherwise = 
+  | otherwise =
     if isJust $ maybePort portNum
-      then
-        portNum
-      else
-        ""
+      then portNum
+      else ""
   where
     portNum = head args
     maybePort port = readMaybe portNum :: Maybe Int
 
 help :: IO ()
-help = 
+help =
   do
     progName <- getProgName
     putStrLn $ "Usage:  " ++ progName ++ " <port>"

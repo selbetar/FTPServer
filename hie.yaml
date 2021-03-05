@@ -8,3 +8,10 @@ cradle:
 
     - path: "./src/server/SockNetwork.hs"
       component: "FTPServer:exe:FTPServer"
+
+    - path: "./src/server/UserState.hs"
+      component: "FTPServer:exe:FTPServer"
+
+    - path: "./src/server/Util.hs"
+      component: "FTPServer:exe:FTPServer"
+
